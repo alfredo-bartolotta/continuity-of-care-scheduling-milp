@@ -1,0 +1,342 @@
+model Patients_centred_scheduling
+  options noimplicit
+  uses "mmxprs", "mmsystem"
+  ! uses "mminsight" ! uncomment this line for an Xpress Insight model
+
+
+declarations
+   input_file:string
+   input_path:string
+        NI, NK, ND, NT, NS, NM: integer
+    scenario: integer !per rilassare e irrigidire il vincolo della CoC si definiscono 3 scenari
+     scenario_name:string
+    end-declarations
+   input_file:= "P100_T10_R4_M4_D5_S12_10.dat"
+   input_path:="../instances/" + input_file
+   scenario := 3  ! 1 = CoC su manuali, 2 = Niente CoC, 3 = CoC su tutte
+
+    if scenario = 1 then
+      scenario_name := "A_CoCmanual"
+    elif scenario = 2 then
+      scenario_name := "B_noCoC"
+    elif scenario = 3 then
+      scenario_name := "C_CoCall"
+    else
+      scenario_name := "UNKNOWN"
+    end-if
+
+
+    initializations from input_path
+        NI NK ND NT NS NM
+    end-initializations
+
+    declarations
+        I = 1..NI ! Patients
+        K = 1..NK ! Physiotherapists
+        D = 1..ND ! Days
+        T = 1..NT ! Time slots
+        J = 1..2 ! Session type
+
+
+
+
+        mui: array(I) of integer !urgency level patient i
+        omegai: array(I) of integer !waiting days for patient i
+        Nij: array(I, J) of integer ! N. of sessions of j-type the i-patient has to carry out
+        tauidt: array(I, D, T) of integer ! =1 if patient i is available on day d at time t
+        sigmakdt: array(K, D, T) of integer ! =1 if physiotherapist k is available on day d at time t
+    end-declarations
+
+    initializations from input_path
+        mui omegai Nij tauidt sigmakdt
+    end-initializations
+
+ declarations
+pi: array (I) of real !priority function of patient i
+
+!--- Decision variables---
+Xikjdt: array (I,K,J,D,T) of mpvar ! =1 if patient i is assigned to physiotherapist k for a j-type session on the d-day at time t, 0 otherwise
+Yik: array (I,K) of mpvar ! =1 if patient i is assigned to physiotherapist k, 0 otherwise
+Zi: array(I) of mpvar !=1 if the patient i is scheduled, 0 otherwise
+
+Tot_benefit: mpvar
+
+end-declarations
+
+forall(i in I) do
+pi (i):=mui(i)*omegai(i) ! mui e omegai li legge
+end-do
+
+! Modelling the binary nature of the mathematical programming variables:
+forall(i in I, k in K, j in J, d in D, t in T) Xikjdt(i,k,j,d,t) is_binary
+forall(i in I, k in K) Yik(i,k) is_binary
+forall(i in I) Zi (i) is_binary
+
+!---Constraints---
+forall(k in K,d in D, t in T) sum (i in I, j in J) Xikjdt(i,k,j,d,t)<= sigmakdt(k,d,t) ! Physiotherpist can work only if available
+forall(d in D, t in T, i in I) sum (k in K, j in J) Xikjdt(i,k,j,d,t)<= tauidt(i,d,t) ! Patients can be scheduled only if available (it guarantees no overlap)
+forall(i in I, d in D, j in J) sum (k in K, t in T) Xikjdt(i,k,j,d,t)<= 1 ! No more than one session type per day is permitted
+forall(d in D, t in T) sum (i in I, j in J, k in K) Xikjdt(i,k,j,d,t)<= NS ! It is not permitted to schedule more appointments than the N. of room available
+forall(d in D, t in T, j in J | j=2) sum (i in I, k in K) Xikjdt(i,k,j,d,t)<= NM ! It is no possible to schedule more machine-session than the machines available
+forall(i in I, j in J) sum (d in D, t in T, k in K) Xikjdt(i,k,j,d,t)= Nij(i,j)*Zi(i) ! if a patient is served, all their sessions must be scheduled
+
+!CoC scenarios
+if scenario=1 then !CoC solo su manuali
+forall(i in I, k in K, j in J | j=1) do sum (d in D, t in T) Xikjdt(i,k,j,d,t)= Nij(i,j)*Yik(i,k) ! CoC constraint
+end-do
+forall(i in I | Nij(i,1)>=1) do sum (k in K) Yik(i,k)=Zi(i) !it is not possible to assign more than one physiotherapist to the manual sessions
+end-do
+forall(i in I |Nij(i,1)=0) do sum (k in K)Yik(i,k)=0
+end-do
+forall(i in I, k in K) do Yik(i,k)<=Zi(i) !consistency constrain
+end-do
+
+elif scenario = 2 then
+  !--------------------------------
+  ! Scenario B: NO CoC (Y inutilizzato)
+  !--------------------------------
+  forall(i in I, k in K) Yik(i,k) = 0 ! disattivazione Yik
+  ! Le sessioni possono essere assegnate a terapisti diversi
+
+elif scenario = 3 then
+  !--------------------------------
+  ! Scenario C: CoC su TUTTE le sessioni
+  !--------------------------------
+  forall(i in I, k in K, j in J) do
+    sum( d in D, t in T) Xikjdt(i,k,j,d,t)=  Nij(i,j) * Yik(i,k)
+  end-do
+
+  forall(i in I | sum(j in J) Nij(i,j) > 0) do
+    sum(k in K) Yik(i,k) = Zi(i)
+  end-do
+
+  forall(i in I, k in K) do
+    Yik(i,k) <= Zi(i)
+  end-do
+end-if
+
+ !---Objective function---
+ Tot_benefit = sum(i in I, k in K, j in J, d in D, t in T) Xikjdt(i,k,j,d,t)* pi(i) !the objective is to maximixe the total benefit
+
+
+!---KPI definition---
+declarations
+start_time: real !starting resolution time
+end_time: real !ending resolution time
+obj_val: real
+best_bound: real
+gap: real
+scheduled_patients: integer
+scheduled_sessions: integer
+requested_sessions: integer
+pct_patients_scheduled: real
+pct_sessions_scheduled: real
+avail_slots_total: integer
+used_slots_total: integer
+global_utilization: real
+avail_slots_k: array(K) of integer
+used_slots_k:  array(K) of integer
+idle_slots_k:  array(K) of integer
+utilization_k: array(K) of real
+max_util: real
+min_util: real
+fairness_gap_util: real
+active_k: integer
+avg_util: real
+std_util: real
+cv_util: real
+end-declarations
+
+!in order to measure the time needed to solve the problem:
+ start_time := gettime
+
+ maximize(Tot_benefit)
+
+ end_time := gettime
+
+ !KPI computation
+!OF computation
+obj_val := getobjval
+best_bound := getparam("XPRS_BESTBOUND")
+if obj_val > 0 then
+    gap := 100 * (best_bound - obj_val) / obj_val
+else
+    gap := 0
+end-if
+!N. of scheduled sessions and patients
+scheduled_patients:= sum(i in I) round(getsol(Zi(i)))
+scheduled_sessions:= sum (i in I, k in K, j in J, d in D, t in T) round(getsol(Xikjdt(i,k,j,d,t)))
+
+ !% N. of scheduled sessions and patients
+ requested_sessions:=sum(i in I, j in J) Nij(i,j)
+ if NI>0 then
+    pct_patients_scheduled:= 100.0*scheduled_patients/NI
+else
+    pct_patients_scheduled:=0.0
+end-if
+
+if requested_sessions>0 then
+    pct_sessions_scheduled:=100.0*scheduled_sessions/requested_sessions
+else
+    pct_sessions_scheduled:=0.0
+end-if
+
+!Physiotherpist utilization and idle slots
+forall(k in K) do
+    avail_slots_k(k):=sum(d in D, t in T) sigmakdt(k,d,t)
+    used_slots_k(k):= sum (i in I, j in J, d in D, t in T) round(getsol(Xikjdt(i,k,j,d,t)))
+    idle_slots_k(k):= avail_slots_k(k)- used_slots_k(k)
+    if avail_slots_k(k)>0 then
+        utilization_k(k):= used_slots_k(k)/avail_slots_k(k)
+    else
+        utilization_k(k):=0.0
+    end-if
+end-do
+
+! --- Fairness KPIs on utilization_k (normalized) ---
+
+! 1) GAP = max(util) - min(util) on active therapists (avail>0)
+max_util := -1.0
+min_util :=  999.0
+
+forall(k in K | avail_slots_k(k) > 0) do
+  if utilization_k(k) > max_util then
+  max_util := utilization_k(k)
+  end-if
+  if utilization_k(k) < min_util then
+  min_util := utilization_k(k)
+  end-if
+end-do
+
+if max_util >= 0 then
+  fairness_gap_util := max_util - min_util
+else
+  fairness_gap_util := 0.0
+end-if
+
+
+! 2) CV = std(util) / mean(util) on active therapists (avail>0)
+active_k := sum(k in K | avail_slots_k(k) > 0) 1
+
+if active_k > 0 then
+  avg_util := sum(k in K | avail_slots_k(k) > 0) utilization_k(k) / (1.0*active_k)
+
+  std_util := sqrt(
+    sum(k in K | avail_slots_k(k) > 0)
+      (utilization_k(k) - avg_util) * (utilization_k(k) - avg_util) / (1.0*active_k))
+
+  if avg_util > 1e-9 then
+    cv_util := std_util / avg_util
+  else
+    cv_util := 0.0
+  end-if
+else
+  avg_util := 0.0
+  std_util := 0.0
+  cv_util := 0.0
+end-if
+
+!Global utilization
+avail_slots_total:=sum(k in K) avail_slots_k(k)
+used_slots_total:=sum(k in K) used_slots_k(k)
+if avail_slots_total>0 then
+    global_utilization:=used_slots_total/avail_slots_total
+else
+    global_utilization:=0.0
+end-if
+
+
+fopen("sol_" + scenario_name + "_" + input_file + ".csv", F_OUTPUT)
+writeln( "Patients, Therapist, session_type, Day, Time_slot")
+
+forall(i in I, k in K, j in J, d in D, t in T |getsol(Xikjdt(i,k,j,d,t))>0.5) writeln(i, ",", k, ",", j, ",", d, ",", t) !writeln(getsol(Xikjdt(i,k,j,d,t)))
+fclose(F_OUTPUT)
+
+!stampa della soluzione
+fopen("report_" + scenario_name + "_" + input_file + ".txt", F_OUTPUT)
+writeln ("\n--- OPTIMAL SOLUTION ---")
+writeln ("Objective function value: ", 1.0*getsol(Tot_benefit))
+writeln("Best Bound: ", best_bound)
+writeln("Gap (%):    ", gap)
+writeln ("Resolution time: ", end_time-start_time, " seconds")
+writeln ("Scheduled patients: ", scheduled_patients)
+writeln ("% of patients scheduled: ", pct_patients_scheduled, "%")
+writeln ("Scheduled sessions: ", scheduled_sessions)
+writeln ("Requested sessions (Demand): ", requested_sessions)
+writeln ("% of sessions scheduled: ", pct_sessions_scheduled, "%")
+writeln ("Global physiotherapist utilization: ", global_utilization)
+writeln("Fairness GAP (max-min utilization): ", fairness_gap_util)
+writeln("Fairness GAP CV (utilization): ", cv_util)
+writeln("--- Physiotherpist details ---")
+forall(k in K) do
+ writeln("k=", k,
+          " | idle slots=", idle_slots_k(k),
+          " | utilization=", utilization_k(k))
+end-do
+fclose(F_OUTPUT)
+
+! Stampa a video
+
+writeln("========== RISULTATI ==========")
+
+writeln("Istanza:    ", input_file)
+
+writeln("scenario:   ", scenario)
+
+writeln("Obj:        ", obj_val)
+
+writeln("Best Bound: ", best_bound)
+
+writeln("Gap (%):    ", gap)
+
+writeln("Tempo (s):  ", end_time - start_time)
+
+writeln ("Scheduled patients: ", scheduled_patients)
+
+writeln ("% of patients scheduled: ", pct_patients_scheduled, "%")
+
+writeln ("Scheduled sessions: ", scheduled_sessions)
+
+writeln ("Requested sessions (Demand): ", requested_sessions)
+
+writeln ("% of sessions scheduled: ", pct_sessions_scheduled, "%")
+
+writeln ("Global utilization: ", global_utilization)
+
+writeln("Fairness GAP (max-min utilization): ", fairness_gap_util)
+
+writeln("Fairness GAP CV (utilization): ", cv_util)
+
+
+writeln("--- Physiotherpist details ---")
+forall(k in K) do
+ writeln("k=", k,
+          " | idle slots=", idle_slots_k(k),
+          " | utilization=", utilization_k(k))
+end-do
+writeln("================================")
+
+! --- KPI CSV for Python (one row per instance) ---
+fopen("kpi_results.csv", F_APPEND)
+
+
+writeln(scenario_name, ";",
+        input_file, ";",
+        obj_val, ";",
+        best_bound, ";",
+        gap, ";",
+        end_time - start_time, ";",
+        scheduled_patients, ";",
+        pct_patients_scheduled, ";",
+        scheduled_sessions, ";",
+        requested_sessions, ";",
+        pct_sessions_scheduled, ";",
+        global_utilization, ";",
+        fairness_gap_util, ";",
+        cv_util)
+
+fclose(F_OUTPUT)
+
+
+end-model
+
