@@ -86,6 +86,7 @@ The three scenarios are evaluated through a multidimensional KPI framework:
 * `scripts/efficiency\_vs\_equity\_plot.py`: Python script used to visualize the relationship between utilization and fairness.
 * `scripts/schedule\_heatmap.py`: Python script used to visualize schedule density by day and time slot.
 * `scripts/gantt\_schedule.py`: Python script used to visualize schedules by patient and physiotherapist.
+* `instances/*.dat`: text files containing the synthetic instances used in the computational experiments, including patients, physiotherapists, availability matrices, required sessions and capacity parameters.
 * `docs/problem\_description.md`: explanation of the scheduling problem, modelling assumptions and scenarios.
 * `results/key\_findings.md`: summary of the main computational findings and limitations.
 * `requirements.txt`: Python libraries required by the scripts.
